@@ -1,0 +1,136 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Copyright 2026 Bloomberg Finance LP
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # BonoboMock requires CMake >= 4.0, newer than either distro ships.
+  CMAKE_VERSION: "4.4.2"
+
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install formatters
+        run: |
+          pip install "clang-format~=21.1" "cmakelang[YAML]==0.6.13"
+          # The Makefile invokes the versioned binary name that LLVM's apt packages use.
+          ln -s "$(command -v clang-format)" "$(dirname "$(command -v clang-format)")/clang-format-21"
+      - run: make check-format
+
+  ubuntu:
+    name: ubuntu-24.04 (C++${{ matrix.cxx }})
+    # BonoboMock patches x86-64 machine code at runtime, so tests need a real x86-64 host.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [17, 20]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build pkg-config git python3 python3-pip
+          pip3 install --user --break-system-packages "cmake==${CMAKE_VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - &restore-deps
+        name: Restore dependencies
+        id: deps-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: &deps-paths |
+            thirdparty
+            install
+            build/bde
+            build/googletest
+          key: &deps-key deps-${{ github.job }}-cpp${{ matrix.cxx }}-${{ hashFiles('bin/build-linux.sh') }}
+      - &build-deps
+        name: Build dependencies
+        run: ./bin/build-linux.sh --cxx-standard "${{ matrix.cxx }}" --deps-only
+      # Saved before BonoboMock is installed into the same prefix, so a cached prefix
+      # never carries a stale BonoboMock that could shadow the one under test.
+      - &save-deps
+        name: Save dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: *deps-paths
+          key: *deps-key
+      - &build-and-test
+        name: Build and test BonoboMock
+        run: ./bin/build-linux.sh --cxx-standard "${{ matrix.cxx }}"
+      # Proves the docs/project-setup/cmake.md walkthrough works against the install.
+      - &verify-quickstart
+        name: Verify cmake-quickstart example
+        run: |
+          cmake --install build/bonobomock
+          cmake -B "$RUNNER_TEMP/quickstart" -S examples/cmake-quickstart -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="$PWD/install"
+          cmake --build "$RUNNER_TEMP/quickstart"
+          ctest --test-dir "$RUNNER_TEMP/quickstart" --output-on-failure
+
+  rhel9:
+    name: rocky-9 (C++${{ matrix.cxx }})
+    runs-on: ubuntu-24.04
+    # Rocky Linux stands in for RHEL 9, whose repos need a subscription.
+    container: rockylinux/rockylinux:9
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [17]
+    env:
+      # RHEL 9's system GCC is 11; gcc-toolset-13 matches the Ubuntu job's compiler.
+      CC: /opt/rh/gcc-toolset-13/root/usr/bin/gcc
+      CXX: /opt/rh/gcc-toolset-13/root/usr/bin/g++
+    steps:
+      # git must exist before checkout, or actions/checkout falls back to a tarball
+      # without history; tar/zstd are needed by actions/cache.
+      - name: Install prerequisites
+        run: |
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled crb
+          dnf install -y \
+            gcc-toolset-13 make ninja-build git tar zstd pkgconf-pkg-config \
+            python3.11 python3.11-pip
+          # RHEL 9's default python3 (3.9) is too old for bde-tools' bbs_build.
+          ln -sf /usr/bin/python3.11 /usr/local/bin/python3
+          python3 -m pip install "cmake==${CMAKE_VERSION}"
+          echo /opt/rh/gcc-toolset-13/root/usr/bin >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+      - *restore-deps
+      - *build-deps
+      - *save-deps
+      - *build-and-test
+      - *verify-quickstart
