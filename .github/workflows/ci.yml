@@ -65,40 +65,29 @@ jobs:
             build-essential ninja-build pkg-config git python3 python3-pip
           pip3 install --user --break-system-packages "cmake==${CMAKE_VERSION}"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Restore dependencies
-        id: deps-cache
-        uses: actions/cache/restore@v4
+      # BDE and GoogleTest take 5-9 minutes to build from source; BonoboMock about one.
+      # build-linux.sh skips the dependency build when the cached sentinels match.
+      # The key is shared with the sanitizers job, which reuses the C++17 deps.
+      - name: Cache dependencies
+        uses: actions/cache@v4
         with:
           path: |
             thirdparty
             install
             build/bde
             build/googletest
-          # Shared with the sanitizers job, which reuses the uninstrumented C++17 deps.
           key: deps-ubuntu-24.04-cpp${{ matrix.cxx }}-${{ hashFiles('bin/build-linux.sh') }}
-      - name: Build dependencies
-        run: ./bin/build-linux.sh --cxx-standard "${{ matrix.cxx }}" --deps-only
-      # Saved before BonoboMock is installed into the same prefix, so a cached prefix
-      # never carries a stale BonoboMock that could shadow the one under test.
-      - name: Save dependencies
-        if: steps.deps-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            thirdparty
-            install
-            build/bde
-            build/googletest
-          key: ${{ steps.deps-cache.outputs.cache-primary-key }}
       - name: Build and test BonoboMock
         run: ./bin/build-linux.sh --cxx-standard "${{ matrix.cxx }}"
       # Proves the docs/project-setup/cmake.md walkthrough works against the install.
+      # BonoboMock installs outside the cached prefix so a stale copy can't be restored
+      # into it and shadow the one under test.
       - name: Verify cmake-quickstart example
         run: |
-          cmake --install build/bonobomock
+          cmake --install build/bonobomock --prefix "$RUNNER_TEMP/bonobomock"
           cmake -B "$RUNNER_TEMP/quickstart" -S examples/cmake-quickstart -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD="${{ matrix.cxx }}" \
-            -DCMAKE_PREFIX_PATH="$PWD/install"
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/bonobomock;$PWD/install"
           cmake --build "$RUNNER_TEMP/quickstart"
           ctest --test-dir "$RUNNER_TEMP/quickstart" --output-on-failure
 
@@ -119,9 +108,8 @@ jobs:
       # mmap randomization: https://github.com/actions/runner-images/issues/9491
       - name: Reduce mmap randomization for ASAN
         run: sudo sysctl vm.mmap_rnd_bits=28
-      - name: Restore dependencies
-        id: deps-cache
-        uses: actions/cache/restore@v4
+      - name: Cache dependencies
+        uses: actions/cache@v4
         with:
           path: |
             thirdparty
@@ -131,16 +119,6 @@ jobs:
           key: deps-ubuntu-24.04-cpp17-${{ hashFiles('bin/build-linux.sh') }}
       - name: Build dependencies
         run: ./bin/build-linux.sh --cxx-standard 17 --deps-only
-      - name: Save dependencies
-        if: steps.deps-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            thirdparty
-            install
-            build/bde
-            build/googletest
-          key: ${{ steps.deps-cache.outputs.cache-primary-key }}
       # Only BonoboMock and its tests are instrumented; BDE and GoogleTest stay
       # uninstrumented, which ASAN and UBSAN both tolerate.
       - name: Build BonoboMock
