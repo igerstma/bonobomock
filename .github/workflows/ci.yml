@@ -98,8 +98,16 @@ jobs:
       # tolerate.
       - name: Build and test BonoboMock with ASAN and UBSAN
         run: |
+          # ASAN's instrumentation tables trip the toolchain's -Wlarger-than-100000 under
+          # -Werror. The toolchain FORCEs its flags, so the override is appended after
+          # project() instead of passed with -D.
+          cat > "$RUNNER_TEMP/sanitize-flags.cmake" <<'EOF'
+          string(APPEND CMAKE_C_FLAGS " -Wno-larger-than")
+          string(APPEND CMAKE_CXX_FLAGS " -Wno-larger-than")
+          EOF
           cmake -B build/bonobomock-sanitize -S . -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$PWD/thirdparty/bde-tools/BdeBuildSystem/toolchains/linux/gcc-default.cmake" \
+            -DCMAKE_PROJECT_INCLUDE="$RUNNER_TEMP/sanitize-flags.cmake" \
             -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
             -DBDE_BUILD_TARGET_CPP${{ matrix.cxx }}=ON \
             -DBDE_BUILD_TARGET_ASAN=ON -DBDE_BUILD_TARGET_UBSAN=ON \
