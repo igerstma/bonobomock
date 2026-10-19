@@ -74,7 +74,8 @@ jobs:
             install
             build/bde
             build/googletest
-          key: deps-${{ github.job }}-cpp${{ matrix.cxx }}-${{ hashFiles('bin/build-linux.sh') }}
+          # Shared with the sanitizers job, which reuses the uninstrumented C++17 deps.
+          key: deps-ubuntu-24.04-cpp${{ matrix.cxx }}-${{ hashFiles('bin/build-linux.sh') }}
       - name: Build dependencies
         run: ./bin/build-linux.sh --cxx-standard "${{ matrix.cxx }}" --deps-only
       # Saved before BonoboMock is installed into the same prefix, so a cached prefix
@@ -100,3 +101,57 @@ jobs:
             -DCMAKE_PREFIX_PATH="$PWD/install"
           cmake --build "$RUNNER_TEMP/quickstart"
           ctest --test-dir "$RUNNER_TEMP/quickstart" --output-on-failure
+
+  # Mirrors the internal devise cmake check: Debug build with ASAN and UBSAN.
+  sanitizers:
+    name: ubuntu-24.04 (C++17, Debug, ASAN+UBSAN)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build pkg-config git python3 python3-pip
+          pip3 install --user --break-system-packages "cmake==${CMAKE_VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # GCC 13's ASAN crashes at startup under the runner kernel's default 32 bits of
+      # mmap randomization: https://github.com/actions/runner-images/issues/9491
+      - name: Reduce mmap randomization for ASAN
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Restore dependencies
+        id: deps-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            thirdparty
+            install
+            build/bde
+            build/googletest
+          key: deps-ubuntu-24.04-cpp17-${{ hashFiles('bin/build-linux.sh') }}
+      - name: Build dependencies
+        run: ./bin/build-linux.sh --cxx-standard 17 --deps-only
+      - name: Save dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            thirdparty
+            install
+            build/bde
+            build/googletest
+          key: ${{ steps.deps-cache.outputs.cache-primary-key }}
+      # Only BonoboMock and its tests are instrumented; BDE and GoogleTest stay
+      # uninstrumented, which ASAN and UBSAN both tolerate.
+      - name: Build BonoboMock
+        run: |
+          cmake -B build/bonobomock -S . -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/thirdparty/bde-tools/BdeBuildSystem/toolchains/linux/gcc-default.cmake" \
+            -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
+            -DBDE_BUILD_TARGET_CPP17=ON \
+            -DBDE_BUILD_TARGET_ASAN=ON -DBDE_BUILD_TARGET_UBSAN=ON \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_PREFIX_PATH="$PWD/install;$PWD/install/lib64"
+          cmake --build build/bonobomock
+      - name: Test BonoboMock
+        run: ctest --test-dir build/bonobomock --output-on-failure
