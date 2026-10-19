@@ -49,20 +49,13 @@ jobs:
       - run: make check-format
 
   ubuntu:
-    name: ubuntu-24.04 (C++${{ matrix.cxx }}${{ matrix.sanitize && ', Debug, ASAN+UBSAN' || '' }})
+    name: ubuntu-24.04 (C++${{ matrix.cxx }})
     # BonoboMock patches x86-64 machine code at runtime, so tests need a real x86-64 host.
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        # Listed explicitly: an include entry matching an existing cxx value would be
-        # merged into that job instead of adding a new one.
-        include:
-          - cxx: 17
-          - cxx: 20
-          # Mirrors the internal devise cmake check: Debug build with ASAN and UBSAN.
-          - cxx: 17
-            sanitize: true
+        cxx: [17, 20]
     steps:
       - uses: actions/checkout@v4
       - name: Install prerequisites
@@ -74,7 +67,6 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       # BDE and GoogleTest take 5-9 minutes to build from source; BonoboMock about one.
       # build-linux.sh skips the dependency build when the cached sentinels match.
-      # The sanitizer entry shares the C++17 key: only BonoboMock is instrumented.
       - name: Cache dependencies
         uses: actions/cache@v4
         with:
@@ -84,15 +76,12 @@ jobs:
             build/bde
             build/googletest
           key: deps-ubuntu-24.04-cpp${{ matrix.cxx }}-${{ hashFiles('bin/build-linux.sh') }}
-
       - name: Build and test BonoboMock
-        if: ${{ !matrix.sanitize }}
         run: ./bin/build-linux.sh --cxx-standard "${{ matrix.cxx }}"
       # Proves the docs/project-setup/cmake.md walkthrough works against the install.
       # BonoboMock installs outside the cached prefix so a stale copy can't be restored
       # into it and shadow the one under test.
       - name: Verify cmake-quickstart example
-        if: ${{ !matrix.sanitize }}
         run: |
           cmake --install build/bonobomock --prefix "$RUNNER_TEMP/bonobomock"
           cmake -B "$RUNNER_TEMP/quickstart" -S examples/cmake-quickstart -G Ninja \
@@ -100,22 +89,21 @@ jobs:
             -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/bonobomock;$PWD/install"
           cmake --build "$RUNNER_TEMP/quickstart"
           ctest --test-dir "$RUNNER_TEMP/quickstart" --output-on-failure
-
       # GCC 13's ASAN crashes at startup under the runner kernel's default 32 bits of
       # mmap randomization: https://github.com/actions/runner-images/issues/9491
       - name: Reduce mmap randomization for ASAN
-        if: ${{ matrix.sanitize }}
         run: sudo sysctl vm.mmap_rnd_bits=28
-      - name: Build and test BonoboMock with sanitizers
-        if: ${{ matrix.sanitize }}
+      # Debug (-O0) because patching must also work without inlining. Only BonoboMock
+      # is instrumented; the cached BDE and GoogleTest are not, which both sanitizers
+      # tolerate.
+      - name: Build and test BonoboMock with ASAN and UBSAN
         run: |
-          ./bin/build-linux.sh --cxx-standard "${{ matrix.cxx }}" --deps-only
-          cmake -B build/bonobomock -S . -G Ninja \
+          cmake -B build/bonobomock-sanitize -S . -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$PWD/thirdparty/bde-tools/BdeBuildSystem/toolchains/linux/gcc-default.cmake" \
             -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
             -DBDE_BUILD_TARGET_CPP${{ matrix.cxx }}=ON \
             -DBDE_BUILD_TARGET_ASAN=ON -DBDE_BUILD_TARGET_UBSAN=ON \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_PREFIX_PATH="$PWD/install;$PWD/install/lib64"
-          cmake --build build/bonobomock
-          ctest --test-dir build/bonobomock --output-on-failure
+          cmake --build build/bonobomock-sanitize
+          ctest --test-dir build/bonobomock-sanitize --output-on-failure
